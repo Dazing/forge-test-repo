@@ -1,30 +1,30 @@
 {
   "format": 1,
   "restore": {
-    "/home/dazing/repos/private/forge.worktrees/feature-forge-sandcastle/samples/vsa-allocation-feature/src/Inventory.Api/Inventory.Api.csproj": {}
+    "/home/agent/workspace/src/src/Inventory.Api/Inventory.Api.csproj": {}
   },
   "projects": {
-    "/home/dazing/repos/private/forge.worktrees/feature-forge-sandcastle/samples/vsa-allocation-feature/src/Inventory.Api/Inventory.Api.csproj": {
+    "/home/agent/workspace/src/src/Inventory.Api/Inventory.Api.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/home/dazing/repos/private/forge.worktrees/feature-forge-sandcastle/samples/vsa-allocation-feature/src/Inventory.Api/Inventory.Api.csproj",
+        "projectUniqueName": "/home/agent/workspace/src/src/Inventory.Api/Inventory.Api.csproj",
         "projectName": "Inventory.Api",
-        "projectPath": "/home/dazing/repos/private/forge.worktrees/feature-forge-sandcastle/samples/vsa-allocation-feature/src/Inventory.Api/Inventory.Api.csproj",
-        "packagesPath": "/home/dazing/.nuget/packages/",
-        "outputPath": "/home/dazing/repos/private/forge.worktrees/feature-forge-sandcastle/samples/vsa-allocation-feature/src/Inventory.Api/obj/",
+        "projectPath": "/home/agent/workspace/src/src/Inventory.Api/Inventory.Api.csproj",
+        "packagesPath": "/home/agent/.nuget/packages/",
+        "outputPath": "/home/agent/workspace/src/src/Inventory.Api/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "/home/dazing/.nuget/NuGet/NuGet.Config"
+          "/home/agent/.nuget/NuGet/NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net10.0"
         ],
         "sources": {
-          "/usr/lib/dotnet/library-packs": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
           "net10.0": {
+            "framework": "net10.0",
             "targetAlias": "net10.0",
             "projectReferences": {}
           }
@@ -40,10 +40,11 @@
           "auditLevel": "low",
           "auditMode": "all"
         },
-        "SdkAnalysisLevel": "10.0.100"
+        "SdkAnalysisLevel": "10.0.400"
       },
       "frameworks": {
         "net10.0": {
+          "framework": "net10.0",
           "targetAlias": "net10.0",
           "imports": [
             "net461",
@@ -64,7 +65,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "/usr/lib/dotnet/sdk/10.0.112/PortableRuntimeIdentifierGraph.json",
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/10.0.401/PortableRuntimeIdentifierGraph.json",
           "packagesToPrune": {
             "Microsoft.AspNetCore": "(,10.0.32767]",
             "Microsoft.AspNetCore.Antiforgery": "(,10.0.32767]",
