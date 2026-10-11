@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "q3qHIaOKTtg=",
+  "dgSpecHash": "fVFxjL8yWxg=",
   "success": true,
-  "projectFilePath": "/home/dazing/repos/private/forge.worktrees/feature-forge-sandcastle/samples/vsa-allocation-feature/tests/Inventory.Tests/Inventory.Tests.csproj",
+  "projectFilePath": "/home/agent/workspace/src/tests/Inventory.Tests/Inventory.Tests.csproj",
   "expectedPackageFiles": [],
   "logs": []
 }
