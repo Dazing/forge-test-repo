@@ -1,0 +1,17 @@
+node_modules/
+.env
+dist/
+.run/
+.sandcastle/logs/
+*.tsbuildinfo
+samples/**/bin/
+samples/**/obj/
+proof/expected/**/bin/
+proof/expected/**/obj/
+proof/evaluators/StructureEvaluator/bin/
+proof/evaluators/StructureEvaluator/obj/
+obj/
+bin/
+.logs/
+.workspaces/
+ticket-queue/
