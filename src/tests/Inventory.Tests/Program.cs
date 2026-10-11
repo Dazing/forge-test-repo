@@ -10,7 +10,13 @@ GetReservation_ReturnsCompleteStableRepresentation();
 ConfirmReservation_ConsumesStockAndRejectsFurtherTransitions();
 CancelReservation_RestoresEveryAllocationExactlyOnce();
 ReservationLifecycle_ConservesPhysicalStock();
-Console.WriteLine("PASS: 8 location-aware inventory slice behavior checks");
+SearchReservations_DefaultListingReturnsFirstPageInIdOrder();
+SearchReservations_FiltersMatchSkuAndStatusTogether();
+SearchReservations_PaginationSelectsExpectedPages();
+SearchReservations_OrderingIsDeterministicAcrossPages();
+SearchReservations_RejectsInvalidFiltersAndPagination();
+SearchReservations_ReturnsMappedReservationsFromTheCurrentSnapshot();
+Console.WriteLine("PASS: 14 location-aware inventory slice behavior checks");
 
 static void GetInventory_NormalizesAndOrdersLocationAwareStock()
 {
@@ -239,6 +245,302 @@ static void ReservationLifecycle_ConservesPhysicalStock()
         PhysicalStock(state, "WIDGET") + first.Quantity == before,
         "confirmed consumption plus physical stock is conserved"
     );
+}
+
+static void SearchReservations_DefaultListingReturnsFirstPageInIdOrder()
+{
+    var state = new InventoryState();
+    SeedReservations(state, 25);
+
+    var result = SearchReservations.Execute(null, null, null, null, state);
+
+    Assert(result.Outcome == SearchReservationsOutcome.Success, "unfiltered search succeeds");
+    var page = result.Response!;
+    Assert(page.Total == 25, "total counts every reservation before pagination");
+    Assert(page.Items.Length == 20, "default limit returns the first 20 reservations");
+    Assert(page.Items[0].Id == ReservationId(1), "first page starts at the lowest reservation ID");
+    Assert(page.Items[19].Id == ReservationId(20), "first page ends at the 20th reservation ID");
+    Assert(state.Version == 0, "search does not increment the state version");
+    Assert(state.Reservations.Count == 25, "search does not add or remove reservations");
+    Assert(
+        GetInventory.Execute("widget", state)?.Available == 15,
+        "search leaves stock unchanged"
+    );
+}
+
+static void SearchReservations_FiltersMatchSkuAndStatusTogether()
+{
+    var state = new InventoryState();
+    SeedReservation(state, 1, "WIDGET", ReservationStatus.Pending);
+    SeedReservation(state, 2, "WIDGET", ReservationStatus.Confirmed);
+    SeedReservation(state, 3, "GADGET", ReservationStatus.Pending);
+    SeedReservation(state, 4, "WIDGET", ReservationStatus.Cancelled);
+
+    var bySku = SearchReservations.Execute("widget", null, null, null, state).Response!;
+    Assert(bySku.Total == 3, "SKU filter counts only matching reservations before pagination");
+    Assert(
+        bySku.Items.Select(item => item.Id)
+            .SequenceEqual([ReservationId(1), ReservationId(2), ReservationId(4)]),
+        "SKU filter is case-insensitive and excludes other SKUs"
+    );
+
+    var pending = SearchReservations.Execute(null, "Pending", null, null, state).Response!;
+    Assert(
+        pending.Items.Select(item => item.Id).SequenceEqual([ReservationId(1), ReservationId(3)]),
+        "Pending filter returns every pending reservation"
+    );
+    var confirmed = SearchReservations.Execute(null, "Confirmed", null, null, state).Response!;
+    Assert(
+        confirmed.Items.Select(item => item.Id).SequenceEqual([ReservationId(2)]),
+        "Confirmed filter returns only the confirmed reservation"
+    );
+    var cancelled = SearchReservations.Execute(null, "Cancelled", null, null, state).Response!;
+    Assert(
+        cancelled.Items.Select(item => item.Id).SequenceEqual([ReservationId(4)]),
+        "Cancelled filter returns only the cancelled reservation"
+    );
+
+    var combined = SearchReservations.Execute("WIDGET", "Confirmed", null, null, state).Response!;
+    Assert(combined.Total == 1, "combined filters count only reservations matching both");
+    Assert(
+        combined.Items.Single().Id == ReservationId(2),
+        "combined SKU and status filters return the intersection"
+    );
+
+    Assert(state.Version == 0, "filtered search does not increment the state version");
+    Assert(state.Reservations.Count == 4, "filtered search does not add or remove reservations");
+    Assert(
+        GetInventory.Execute("widget", state)?.Available == 15,
+        "filtered search leaves stock unchanged"
+    );
+}
+
+static void SearchReservations_PaginationSelectsExpectedPages()
+{
+    var state = new InventoryState();
+    SeedReservations(state, 5);
+
+    var firstPage = SearchReservations.Execute(null, null, "0", "1", state).Response!;
+    Assert(
+        firstPage.Items.Length == 1 && firstPage.Items[0].Id == ReservationId(1),
+        "explicit offset 0 with limit 1 selects the first reservation"
+    );
+    Assert(firstPage.Total == 5, "explicit page keeps the total matching count");
+
+    var middlePage = SearchReservations.Execute(null, null, "2", "2", state).Response!;
+    Assert(
+        middlePage.Items.Select(item => item.Id)
+            .SequenceEqual([ReservationId(3), ReservationId(4)]),
+        "offset 2 with limit 2 selects the middle page"
+    );
+
+    var partialFinalPage = SearchReservations.Execute(null, null, "4", "2", state).Response!;
+    Assert(
+        partialFinalPage.Items.Select(item => item.Id).SequenceEqual([ReservationId(5)]),
+        "offset 4 returns the partial final page"
+    );
+    Assert(partialFinalPage.Total == 5, "partial final page retains the total matching count");
+
+    var atMatchingCount = SearchReservations.Execute(null, null, "5", "20", state).Response!;
+    Assert(
+        atMatchingCount.Items.Length == 0 && atMatchingCount.Total == 5,
+        "offset at the matching count returns an empty page with the total"
+    );
+
+    var beyondMatchingCount = SearchReservations.Execute(null, null, "6", "20", state).Response!;
+    Assert(
+        beyondMatchingCount.Items.Length == 0 && beyondMatchingCount.Total == 5,
+        "offset beyond the matching count returns an empty page with the total"
+    );
+
+    var noMatches = SearchReservations.Execute("GADGET", null, null, null, state).Response!;
+    Assert(
+        noMatches.Items.Length == 0 && noMatches.Total == 0,
+        "unmatched SKU returns an empty page with total 0"
+    );
+
+    var largeState = new InventoryState();
+    SeedReservations(largeState, 105);
+    var largestPage = SearchReservations.Execute(null, null, "0", "100", largeState).Response!;
+    Assert(
+        largestPage.Items.Length == 100 && largestPage.Total == 105,
+        "limit 100 returns exactly 100 reservations from a larger match set"
+    );
+    var tailPage = SearchReservations.Execute(null, null, "100", "100", largeState).Response!;
+    Assert(
+        tailPage.Items.Length == 5
+            && tailPage.Items[0].Id == ReservationId(101)
+            && tailPage.Total == 105,
+        "offset 100 returns the remaining partial page"
+    );
+
+    Assert(state.Version == 0, "pagination does not increment the state version");
+    Assert(
+        GetInventory.Execute("widget", state)?.Available == 15,
+        "pagination leaves stock unchanged"
+    );
+}
+
+static void SearchReservations_OrderingIsDeterministicAcrossPages()
+{
+    var state = new InventoryState();
+    foreach (var ordinal in new[] { 7, 3, 11, 1, 9, 5, 2, 10, 4, 6, 8 })
+    {
+        SeedReservation(state, ordinal, "WIDGET", ReservationStatus.Pending);
+    }
+
+    var firstPage = SearchReservations.Execute(null, null, "0", "3", state).Response!;
+    Assert(
+        firstPage.Items.Select(item => item.Id)
+            .SequenceEqual([ReservationId(1), ReservationId(2), ReservationId(3)]),
+        "first page is ordered by reservation ID, not insertion order"
+    );
+
+    var seen = new List<Guid>();
+    for (var offset = 0; offset <= 12; offset += 3)
+    {
+        var page = SearchReservations.Execute(null, null, offset.ToString(), "3", state).Response!;
+        Assert(page.Total == 11, "total stays the matching count on every page");
+        foreach (var item in page.Items)
+        {
+            seen.Add(item.Id);
+        }
+    }
+
+    Assert(
+        seen.SequenceEqual(Enumerable.Range(1, 11).Select(ordinal => ReservationId(ordinal))),
+        "successive pages cover every reservation in ID order without duplicates or omissions"
+    );
+    Assert(state.Version == 0, "paging does not increment the state version");
+}
+
+static void SearchReservations_RejectsInvalidFiltersAndPagination()
+{
+    var state = new InventoryState();
+    SeedReservations(state, 5);
+
+    Assert(
+        SearchReservations.Execute(null, "Shipping", null, null, state).Outcome
+            == SearchReservationsOutcome.InvalidStatus,
+        "unsupported status is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, "", null, null, state).Outcome
+            == SearchReservationsOutcome.InvalidStatus,
+        "blank status filter is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, "abc", null, state).Outcome
+            == SearchReservationsOutcome.InvalidOffset,
+        "malformed offset is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, "1.5", null, state).Outcome
+            == SearchReservationsOutcome.InvalidOffset,
+        "non-integer offset is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, "-1", null, state).Outcome
+            == SearchReservationsOutcome.InvalidOffset,
+        "negative offset is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, null, "0", state).Outcome
+            == SearchReservationsOutcome.InvalidLimit,
+        "zero limit is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, null, "-5", state).Outcome
+            == SearchReservationsOutcome.InvalidLimit,
+        "negative limit is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, null, "101", state).Outcome
+            == SearchReservationsOutcome.InvalidLimit,
+        "limit above 100 is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(null, null, null, "x", state).Outcome
+            == SearchReservationsOutcome.InvalidLimit,
+        "malformed limit is rejected"
+    );
+    Assert(
+        SearchReservations.Execute(" ", null, null, null, state).Outcome
+            == SearchReservationsOutcome.InvalidSku,
+        "blank SKU filter is rejected"
+    );
+
+    Assert(
+        state.Version == 0 && state.Reservations.Count == 5,
+        "rejected searches leave reservations and version unchanged"
+    );
+    Assert(
+        GetInventory.Execute("widget", state)?.Available == 15,
+        "rejected searches leave stock unchanged"
+    );
+}
+
+static void SearchReservations_ReturnsMappedReservationsFromTheCurrentSnapshot()
+{
+    var state = new InventoryState();
+    var created = CreateReservation.Execute("widget", 9, state).Reservation!;
+    SeedReservation(state, 1, "WIDGET", ReservationStatus.Confirmed);
+
+    var page = SearchReservations.Execute("WIDGET", null, null, null, state).Response!;
+
+    Assert(page.Total == 2, "total counts every reservation in the snapshot used for the page");
+    Assert(
+        page.Items[0].Id == ReservationId(1)
+            && page.Items[0].Status == "Confirmed"
+            && page.Items[0].Quantity == 1,
+        "mapped item exposes public status and quantity"
+    );
+    var createdItem = page.Items[1];
+    Assert(
+        createdItem.Id == created.Id && createdItem.Status == "Pending",
+        "mapped item exposes the live reservation status"
+    );
+    Assert(createdItem.Allocations.Length == 2, "mapped item exposes every allocation");
+    Assert(
+        createdItem.Allocations[0] is { Location: "NORTH", Quantity: 8 },
+        "mapped allocation order is preserved"
+    );
+    Assert(
+        createdItem.Allocations[1] is { Location: "SOUTH", Quantity: 1 },
+        "mapped allocation quantity is preserved"
+    );
+
+    ConfirmReservation.Execute(created.Id, state);
+    var afterConfirm = SearchReservations.Execute("WIDGET", null, null, null, state).Response!;
+    Assert(
+        afterConfirm.Items[1].Status == "Confirmed" && afterConfirm.Total == 2,
+        "a later search reflects the committed state"
+    );
+    Assert(state.Version == 2, "search leaves the version written by mutations intact");
+}
+
+static Guid ReservationId(int ordinal)
+{
+    return Guid.Parse($"{ordinal:x8}-0000-0000-0000-000000000000");
+}
+
+static void SeedReservations(InventoryState state, int count)
+{
+    for (var ordinal = count; ordinal >= 1; ordinal--)
+    {
+        SeedReservation(state, ordinal, "WIDGET", ReservationStatus.Pending);
+    }
+}
+
+static void SeedReservation(
+    InventoryState state,
+    int ordinal,
+    string sku,
+    ReservationStatus status
+)
+{
+    var id = ReservationId(ordinal);
+    state.Reservations.Add(id, new ReservationRecord(id, sku, 1, status, []));
 }
 
 static int PhysicalStock(InventoryState state, string sku)

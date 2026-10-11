@@ -12,6 +12,7 @@ GetInventory.Map(app);
 ReceiveLocationStock.Map(app);
 CreateReservation.Map(app);
 GetReservation.Map(app);
+SearchReservations.Map(app);
 ConfirmReservation.Map(app);
 CancelReservation.Map(app);
 app.Run();
