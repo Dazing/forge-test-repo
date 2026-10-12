@@ -6,13 +6,17 @@ GetInventory_NormalizesAndOrdersLocationAwareStock();
 GetLowStockReport_ReportsQualifyingLocationsInStableOrder();
 GetLowStockReport_ReturnsEmptyReportWhenNoLocationsQualify();
 ReceiveLocationStock_ValidatesOverflowAndVersioning();
+TransferStock_MovesStockAboveSafetyStockFloor();
+TransferStock_RejectsInvalidAndMissingEntitiesWithoutMutation();
+TransferStock_RejectsDestinationOverflowWithoutMutation();
+TransferStock_ConcurrentTransfersCommitOnlyAffordableRequests();
 CreateReservation_AllocatesGreedilyWithoutCrossingSafetyStock();
 CreateReservation_FailuresAreMutationFree();
 GetReservation_ReturnsCompleteStableRepresentation();
 ConfirmReservation_ConsumesStockAndRejectsFurtherTransitions();
 CancelReservation_RestoresEveryAllocationExactlyOnce();
 ReservationLifecycle_ConservesPhysicalStock();
-Console.WriteLine("PASS: 10 location-aware inventory slice behavior checks");
+Console.WriteLine("PASS: 14 location-aware inventory slice behavior checks");
 
 static void GetInventory_NormalizesAndOrdersLocationAwareStock()
 {
@@ -125,7 +129,8 @@ static void GetLowStockReport_ReturnsEmptyReportWhenNoLocationsQualify()
     Assert(empty.Version == 0, "reporting an empty inventory does not increment the version");
 }
 
-static void SeedLocation(
+
+SeedLocation(
     InventoryState state,
     string sku,
     string location,
@@ -184,6 +189,246 @@ static void ReceiveLocationStock_ValidatesOverflowAndVersioning()
         "overflow does not mutate stock"
     );
     Assert(state.Version == 2, "only the two successful receipts increment version");
+}
+
+static void TransferStock_MovesStockAboveSafetyStockFloor()
+{
+    var state = new InventoryState();
+
+    var transferred = TransferStock.Execute(" widget ", " north ", " south ", 3, state);
+
+    Assert(
+        transferred.Outcome == TransferStockOutcome.Transferred,
+        "mixed-case transfer above the safety floor succeeds"
+    );
+    Assert(
+        transferred.Item
+            is
+        {
+            Sku: "WIDGET",
+            SourceLocation: "NORTH",
+            DestinationLocation: "SOUTH",
+            Quantity: 3,
+            SourceAvailable: 7,
+            DestinationAvailable: 11
+        },
+        "response uses uppercase identifiers and updated stock for both locations"
+    );
+    Assert(state.Version == 1, "successful transfer increments version once");
+
+    var toFloor = TransferStock.Execute("WIDGET", "NORTH", "SOUTH", 5, state);
+    Assert(
+        toFloor.Outcome == TransferStockOutcome.Transferred,
+        "source can transfer exactly its stock above the safety floor"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 2,
+        "source is left exactly at its safety floor"
+    );
+    Assert(
+        state.Stock["WIDGET"]["SOUTH"].Available == 16,
+        "destination gains every transferred unit"
+    );
+    Assert(
+        PhysicalStock(state, "WIDGET") == 18,
+        "successful transfers conserve total physical stock"
+    );
+    Assert(state.Version == 2, "each successful transfer increments version once");
+
+    var beyondFloor = TransferStock.Execute("widget", "north", "south", 1, state);
+    Assert(
+        beyondFloor.Outcome == TransferStockOutcome.InsufficientStock,
+        "transfer beyond the safety floor is rejected"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 2,
+        "rejected transfer leaves source stock at the floor"
+    );
+    Assert(
+        state.Stock["WIDGET"]["SOUTH"].Available == 16,
+        "rejected transfer leaves destination stock unchanged"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].SafetyStock == 2
+            && state.Stock["WIDGET"]["SOUTH"].SafetyStock == 1,
+        "rejected transfer preserves both safety-stock values"
+    );
+    Assert(state.Version == 2, "rejected transfer does not increment version");
+
+    var belowFloorState = new InventoryState();
+    belowFloorState.Stock["GADGET"] = new Dictionary<string, LocationStockRecord>(
+        StringComparer.OrdinalIgnoreCase
+    )
+    {
+        ["EAST"] = new("GADGET", "EAST", 1, 3),
+        ["WEST"] = new("GADGET", "WEST", 5, 0),
+    };
+    var belowFloor = TransferStock.Execute("gadget", "east", "west", 1, belowFloorState);
+    Assert(
+        belowFloor.Outcome == TransferStockOutcome.InsufficientStock,
+        "source below its safety floor cannot transfer"
+    );
+    Assert(
+        belowFloorState.Stock["GADGET"]["EAST"].Available == 1
+            && belowFloorState.Stock["GADGET"]["WEST"].Available == 5,
+        "below-floor failure is mutation-free"
+    );
+    Assert(belowFloorState.Version == 0, "below-floor failure does not increment version");
+}
+
+static void TransferStock_RejectsInvalidAndMissingEntitiesWithoutMutation()
+{
+    var state = new InventoryState();
+
+    var zero = TransferStock.Execute("widget", "north", "south", 0, state);
+    var negative = TransferStock.Execute("widget", "north", "south", -5, state);
+    var blankSource = TransferStock.Execute("widget", " ", "south", 1, state);
+    var blankDestination = TransferStock.Execute("widget", "north", " ", 1, state);
+    var sameLocation = TransferStock.Execute("widget", "north", "NORTH", 1, state);
+    var trimmedSameLocation = TransferStock.Execute("widget", " north ", "NORTH", 1, state);
+    var missingSku = TransferStock.Execute("missing", "north", "south", 1, state);
+    var missingSource = TransferStock.Execute("widget", "east", "south", 1, state);
+    var missingDestination = TransferStock.Execute("widget", "north", "east", 1, state);
+
+    Assert(zero.Outcome == TransferStockOutcome.Invalid, "zero quantity is rejected");
+    Assert(zero.InvalidField == "quantity", "zero quantity names the quantity field");
+    Assert(negative.Outcome == TransferStockOutcome.Invalid, "negative quantity is rejected");
+    Assert(
+        blankSource.Outcome == TransferStockOutcome.Invalid,
+        "blank source location is rejected"
+    );
+    Assert(blankSource.InvalidField == "sourceLocation", "blank source names its field");
+    Assert(
+        blankDestination.Outcome == TransferStockOutcome.Invalid,
+        "blank destination location is rejected"
+    );
+    Assert(
+        sameLocation.Outcome == TransferStockOutcome.Invalid,
+        "locations that differ only in case are the same location and are rejected"
+    );
+    Assert(
+        trimmedSameLocation.Outcome == TransferStockOutcome.Invalid,
+        "locations that match after trimming are rejected"
+    );
+    Assert(
+        missingSku.Outcome == TransferStockOutcome.UnknownSku,
+        "unknown SKU is rejected"
+    );
+    Assert(
+        missingSource.Outcome == TransferStockOutcome.UnknownSourceLocation,
+        "unknown source location is rejected"
+    );
+    Assert(
+        missingDestination.Outcome == TransferStockOutcome.UnknownDestinationLocation,
+        "unknown destination location is rejected"
+    );
+
+    var inventory = GetInventory.Execute("widget", state)!;
+    Assert(inventory.Locations.Length == 2, "missing locations are not created implicitly");
+    Assert(
+        inventory.Locations[0] is { Location: "NORTH", Available: 10, SafetyStock: 2 },
+        "failed transfers leave source stock and safety stock unchanged"
+    );
+    Assert(
+        inventory.Locations[1] is { Location: "SOUTH", Available: 8, SafetyStock: 1 },
+        "failed transfers leave destination stock and safety stock unchanged"
+    );
+    Assert(
+        GetInventory.Execute("missing", state) is null,
+        "unknown SKU is not created implicitly"
+    );
+    Assert(state.Version == 0, "failed transfers do not increment version");
+}
+
+static void TransferStock_RejectsDestinationOverflowWithoutMutation()
+{
+    var state = new InventoryState();
+    state.Stock["OVERFLOW"] = new Dictionary<string, LocationStockRecord>(
+        StringComparer.OrdinalIgnoreCase
+    )
+    {
+        ["SOURCE"] = new("OVERFLOW", "SOURCE", 10, 0),
+        ["DEST"] = new("OVERFLOW", "DEST", int.MaxValue - 3, 0),
+    };
+
+    var exact = TransferStock.Execute("overflow", "source", "dest", 3, state);
+    var exceeding = TransferStock.Execute("overflow", "source", "dest", 1, state);
+
+    Assert(
+        exact.Outcome == TransferStockOutcome.Transferred,
+        "destination can reach the maximum integer value exactly"
+    );
+    Assert(
+        state.Stock["OVERFLOW"]["DEST"].Available == int.MaxValue,
+        "destination reaches the maximum integer value"
+    );
+    Assert(
+        state.Stock["OVERFLOW"]["SOURCE"].Available == 7,
+        "source is debited by the successful transfer"
+    );
+    Assert(
+        exceeding.Outcome == TransferStockOutcome.DestinationOverflow,
+        "transfer that would overflow the destination is rejected"
+    );
+    Assert(
+        state.Stock["OVERFLOW"]["SOURCE"].Available == 7,
+        "overflow rejects without debiting the source"
+    );
+    Assert(
+        state.Stock["OVERFLOW"]["DEST"].Available == int.MaxValue,
+        "overflow leaves the destination unchanged"
+    );
+    Assert(
+        state.Stock["OVERFLOW"]["SOURCE"].SafetyStock == 0
+            && state.Stock["OVERFLOW"]["DEST"].SafetyStock == 0,
+        "overflow preserves safety-stock values"
+    );
+    Assert(state.Version == 1, "only the successful transfer increments version");
+}
+
+static void TransferStock_ConcurrentTransfersCommitOnlyAffordableRequests()
+{
+    var state = new InventoryState();
+    var quantities = new[] { 3, 3, 3, 3 };
+    var outcomes = new TransferStockOutcome[quantities.Length];
+    var start = new ManualResetEventSlim(false);
+    var threads = quantities
+        .Select((quantity, index) => new Thread(() =>
+        {
+            start.Wait();
+            outcomes[index] = TransferStock.Execute("widget", "north", "south", quantity, state)
+                .Outcome;
+        }))
+        .ToArray();
+
+    foreach (var thread in threads)
+    {
+        thread.Start();
+    }
+    start.Set();
+    foreach (var thread in threads)
+    {
+        thread.Join();
+    }
+
+    var succeeded = outcomes.Count(outcome => outcome == TransferStockOutcome.Transferred);
+    var conflicts = outcomes.Count(outcome => outcome == TransferStockOutcome.InsufficientStock);
+
+    Assert(
+        succeeded == 2,
+        "only transfers affordable at their atomic commit succeed"
+    );
+    Assert(
+        conflicts == 2,
+        "combined demand beyond the transferable stock is rejected as a conflict"
+    );
+    var inventory = GetInventory.Execute("widget", state)!;
+    Assert(inventory.Locations[0].Available == 4, "source never crosses its safety floor");
+    Assert(inventory.Locations[0].SafetyStock == 2, "source safety stock is preserved");
+    Assert(inventory.Locations[1].Available == 14, "destination gains only committed stock");
+    Assert(inventory.Locations[1].SafetyStock == 1, "destination safety stock is preserved");
+    Assert(PhysicalStock(state, "WIDGET") == 18, "competing transfers conserve total stock");
+    Assert(state.Version == 2, "version increments once per successful transfer");
 }
 
 static void CreateReservation_AllocatesGreedilyWithoutCrossingSafetyStock()

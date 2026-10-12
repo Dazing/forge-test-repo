@@ -11,6 +11,7 @@ GetHealth.Map(app);
 GetInventory.Map(app);
 GetLowStockReport.Map(app);
 ReceiveLocationStock.Map(app);
+TransferStock.Map(app);
 CreateReservation.Map(app);
 GetReservation.Map(app);
 ConfirmReservation.Map(app);
