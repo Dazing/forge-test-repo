@@ -3,6 +3,8 @@ using Inventory.Api.Features.Inventory;
 using Inventory.Api.Features.Reservations;
 
 GetInventory_NormalizesAndOrdersLocationAwareStock();
+GetLowStockReport_ReportsQualifyingLocationsInStableOrder();
+GetLowStockReport_ReturnsEmptyReportWhenNoLocationsQualify();
 ReceiveLocationStock_ValidatesOverflowAndVersioning();
 TransferStock_MovesStockAboveSafetyStockFloor();
 TransferStock_RejectsInvalidAndMissingEntitiesWithoutMutation();
@@ -14,7 +16,7 @@ GetReservation_ReturnsCompleteStableRepresentation();
 ConfirmReservation_ConsumesStockAndRejectsFurtherTransitions();
 CancelReservation_RestoresEveryAllocationExactlyOnce();
 ReservationLifecycle_ConservesPhysicalStock();
-Console.WriteLine("PASS: 12 location-aware inventory slice behavior checks");
+Console.WriteLine("PASS: 14 location-aware inventory slice behavior checks");
 
 static void GetInventory_NormalizesAndOrdersLocationAwareStock()
 {
@@ -36,6 +38,115 @@ static void GetInventory_NormalizesAndOrdersLocationAwareStock()
         "SOUTH is second with safety stock excluded"
     );
     Assert(GetInventory.Execute("missing", state) is null, "unknown SKU is absent");
+}
+
+static void GetLowStockReport_ReportsQualifyingLocationsInStableOrder()
+{
+    var state = new InventoryState();
+    SeedLocation(state, "gadget", "east", 1, 5);
+    SeedLocation(state, "gadget", "west", 4, 4);
+    SeedLocation(state, "gadget", "north", 9, 3);
+    SeedLocation(state, "anvil", "south", 2, 7);
+
+    var report = GetLowStockReport.Execute(state);
+
+    Assert(report.Length == 3, "below-threshold and exactly-at-threshold locations are reported");
+    Assert(
+        report[0] is
+        {
+            Sku: "ANVIL",
+            Location: "SOUTH",
+            Available: 2,
+            SafetyStock: 7,
+            Shortfall: 5
+        },
+        "earlier SKU is reported first with its shortfall"
+    );
+    Assert(
+        report[1] is
+        {
+            Sku: "GADGET",
+            Location: "EAST",
+            Available: 1,
+            SafetyStock: 5,
+            Shortfall: 4
+        },
+        "below-threshold shortfall is safety stock minus available quantity"
+    );
+    Assert(
+        report[2] is
+        {
+            Sku: "GADGET",
+            Location: "WEST",
+            Available: 4,
+            SafetyStock: 4,
+            Shortfall: 0
+        },
+        "exactly-at-threshold locations are included with shortfall 0"
+    );
+    Assert(
+        !report.Any(entry => entry.Location == "NORTH"),
+        "above-threshold locations are excluded"
+    );
+    Assert(
+        GetLowStockReport.Execute(state).SequenceEqual(report),
+        "repeat reporting is stable and mutation-free"
+    );
+    Assert(state.Version == 0, "reporting does not increment the state version");
+    Assert(state.Reservations.Count == 0, "reporting stores no reservations");
+    Assert(PhysicalStock(state, "WIDGET") == 18, "reporting leaves physical stock unchanged");
+    Assert(
+        GetInventory.Execute("widget", state)?.Available == 15,
+        "existing inventory lookup is intact after reporting"
+    );
+}
+
+static void GetLowStockReport_ReturnsEmptyReportWhenNoLocationsQualify()
+{
+    var seeded = new InventoryState();
+
+    var aboveThreshold = GetLowStockReport.Execute(seeded);
+
+    Assert(
+        aboveThreshold.Length == 0,
+        "locations above their safety stock produce an empty report"
+    );
+    Assert(seeded.Version == 0, "empty reporting does not increment the state version");
+    Assert(
+        GetInventory.Execute("widget", seeded)?.Available == 15,
+        "empty reporting leaves stock unchanged"
+    );
+
+    var empty = new InventoryState();
+    lock (empty.SyncRoot)
+    {
+        empty.Stock.Clear();
+    }
+
+    var emptyReport = GetLowStockReport.Execute(empty);
+
+    Assert(emptyReport.Length == 0, "empty inventory produces an empty report");
+    Assert(empty.Version == 0, "reporting an empty inventory does not increment the version");
+}
+
+
+SeedLocation(
+    InventoryState state,
+    string sku,
+    string location,
+    int available,
+    int safetyStock
+)
+{
+    lock (state.SyncRoot)
+    {
+        if (!state.Stock.TryGetValue(sku, out var locations))
+        {
+            locations = new Dictionary<string, LocationStockRecord>(StringComparer.OrdinalIgnoreCase);
+            state.Stock[sku] = locations;
+        }
+        locations[location] = new LocationStockRecord(sku, location, available, safetyStock);
+    }
 }
 
 static void ReceiveLocationStock_ValidatesOverflowAndVersioning()
