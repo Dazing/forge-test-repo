@@ -52,36 +52,18 @@ static void GetLowStockReport_ReportsQualifyingLocationsInStableOrder()
 
     Assert(report.Length == 3, "below-threshold and exactly-at-threshold locations are reported");
     Assert(
-        report[0] is
-        {
-            Sku: "ANVIL",
-            Location: "SOUTH",
-            Available: 2,
-            SafetyStock: 7,
-            Shortfall: 5
-        },
+        report[0]
+            is { Sku: "ANVIL", Location: "SOUTH", Available: 2, SafetyStock: 7, Shortfall: 5 },
         "earlier SKU is reported first with its shortfall"
     );
     Assert(
-        report[1] is
-        {
-            Sku: "GADGET",
-            Location: "EAST",
-            Available: 1,
-            SafetyStock: 5,
-            Shortfall: 4
-        },
+        report[1]
+            is { Sku: "GADGET", Location: "EAST", Available: 1, SafetyStock: 5, Shortfall: 4 },
         "below-threshold shortfall is safety stock minus available quantity"
     );
     Assert(
-        report[2] is
-        {
-            Sku: "GADGET",
-            Location: "WEST",
-            Available: 4,
-            SafetyStock: 4,
-            Shortfall: 0
-        },
+        report[2]
+            is { Sku: "GADGET", Location: "WEST", Available: 4, SafetyStock: 4, Shortfall: 0 },
         "exactly-at-threshold locations are included with shortfall 0"
     );
     Assert(
@@ -129,8 +111,7 @@ static void GetLowStockReport_ReturnsEmptyReportWhenNoLocationsQualify()
     Assert(empty.Version == 0, "reporting an empty inventory does not increment the version");
 }
 
-
-SeedLocation(
+static void SeedLocation(
     InventoryState state,
     string sku,
     string location,
@@ -142,7 +123,9 @@ SeedLocation(
     {
         if (!state.Stock.TryGetValue(sku, out var locations))
         {
-            locations = new Dictionary<string, LocationStockRecord>(StringComparer.OrdinalIgnoreCase);
+            locations = new Dictionary<string, LocationStockRecord>(
+                StringComparer.OrdinalIgnoreCase
+            );
             state.Stock[sku] = locations;
         }
         locations[location] = new LocationStockRecord(sku, location, available, safetyStock);
@@ -203,15 +186,14 @@ static void TransferStock_MovesStockAboveSafetyStockFloor()
     );
     Assert(
         transferred.Item
-            is
-        {
-            Sku: "WIDGET",
-            SourceLocation: "NORTH",
-            DestinationLocation: "SOUTH",
-            Quantity: 3,
-            SourceAvailable: 7,
-            DestinationAvailable: 11
-        },
+            is {
+                Sku: "WIDGET",
+                SourceLocation: "NORTH",
+                DestinationLocation: "SOUTH",
+                Quantity: 3,
+                SourceAvailable: 7,
+                DestinationAvailable: 11
+            },
         "response uses uppercase identifiers and updated stock for both locations"
     );
     Assert(state.Version == 1, "successful transfer increments version once");
@@ -310,10 +292,7 @@ static void TransferStock_RejectsInvalidAndMissingEntitiesWithoutMutation()
         trimmedSameLocation.Outcome == TransferStockOutcome.Invalid,
         "locations that match after trimming are rejected"
     );
-    Assert(
-        missingSku.Outcome == TransferStockOutcome.UnknownSku,
-        "unknown SKU is rejected"
-    );
+    Assert(missingSku.Outcome == TransferStockOutcome.UnknownSku, "unknown SKU is rejected");
     Assert(
         missingSource.Outcome == TransferStockOutcome.UnknownSourceLocation,
         "unknown source location is rejected"
@@ -333,10 +312,7 @@ static void TransferStock_RejectsInvalidAndMissingEntitiesWithoutMutation()
         inventory.Locations[1] is { Location: "SOUTH", Available: 8, SafetyStock: 1 },
         "failed transfers leave destination stock and safety stock unchanged"
     );
-    Assert(
-        GetInventory.Execute("missing", state) is null,
-        "unknown SKU is not created implicitly"
-    );
+    Assert(GetInventory.Execute("missing", state) is null, "unknown SKU is not created implicitly");
     Assert(state.Version == 0, "failed transfers do not increment version");
 }
 
@@ -393,12 +369,16 @@ static void TransferStock_ConcurrentTransfersCommitOnlyAffordableRequests()
     var outcomes = new TransferStockOutcome[quantities.Length];
     var start = new ManualResetEventSlim(false);
     var threads = quantities
-        .Select((quantity, index) => new Thread(() =>
-        {
-            start.Wait();
-            outcomes[index] = TransferStock.Execute("widget", "north", "south", quantity, state)
-                .Outcome;
-        }))
+        .Select(
+            (quantity, index) =>
+                new Thread(() =>
+                {
+                    start.Wait();
+                    outcomes[index] = TransferStock
+                        .Execute("widget", "north", "south", quantity, state)
+                        .Outcome;
+                })
+        )
         .ToArray();
 
     foreach (var thread in threads)
@@ -414,10 +394,7 @@ static void TransferStock_ConcurrentTransfersCommitOnlyAffordableRequests()
     var succeeded = outcomes.Count(outcome => outcome == TransferStockOutcome.Transferred);
     var conflicts = outcomes.Count(outcome => outcome == TransferStockOutcome.InsufficientStock);
 
-    Assert(
-        succeeded == 2,
-        "only transfers affordable at their atomic commit succeed"
-    );
+    Assert(succeeded == 2, "only transfers affordable at their atomic commit succeed");
     Assert(
         conflicts == 2,
         "combined demand beyond the transferable stock is rejected as a conflict"
