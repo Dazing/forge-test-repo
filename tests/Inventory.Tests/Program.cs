@@ -10,13 +10,24 @@ TransferStock_MovesStockAboveSafetyStockFloor();
 TransferStock_RejectsInvalidAndMissingEntitiesWithoutMutation();
 TransferStock_RejectsDestinationOverflowWithoutMutation();
 TransferStock_ConcurrentTransfersCommitOnlyAffordableRequests();
+AdjustStock_AppliesNegativeDeltaDownToSafetyStockFloor();
+AdjustStock_RejectsInvalidShapeBeforeIdentityAndFloor();
+AdjustStock_DoesNotCreateUnknownSkuOrLocation();
+AdjustStock_RejectsRangeViolationsWithoutMutation();
+AdjustStock_PositiveDeltaRaisesAvailableByExactlyTheDelta();
+AdjustStock_ConcurrentAdjustmentsAppendOneAuditAndVersionPerSuccess();
+GetStockAdjustments_ReturnsSkuHistoryInChronologicalOrder();
+GetStockAdjustments_ScopesRowsToTheNormalizedSku();
+GetStockAdjustments_ReturnsEmptyHistoryForKnownSkuWithoutAdjustments();
+GetStockAdjustments_ReturnsNullForBlankOrUnknownSku();
+GetStockAdjustments_IsMutationFreeAcrossRepeatCalls();
 CreateReservation_AllocatesGreedilyWithoutCrossingSafetyStock();
 CreateReservation_FailuresAreMutationFree();
 GetReservation_ReturnsCompleteStableRepresentation();
 ConfirmReservation_ConsumesStockAndRejectsFurtherTransitions();
 CancelReservation_RestoresEveryAllocationExactlyOnce();
 ReservationLifecycle_ConservesPhysicalStock();
-Console.WriteLine("PASS: 14 location-aware inventory slice behavior checks");
+Console.WriteLine("PASS: 25 location-aware inventory slice behavior checks");
 
 static void GetInventory_NormalizesAndOrdersLocationAwareStock()
 {
@@ -406,6 +417,409 @@ static void TransferStock_ConcurrentTransfersCommitOnlyAffordableRequests()
     Assert(inventory.Locations[1].SafetyStock == 1, "destination safety stock is preserved");
     Assert(PhysicalStock(state, "WIDGET") == 18, "competing transfers conserve total stock");
     Assert(state.Version == 2, "version increments once per successful transfer");
+}
+
+static void AdjustStock_AppliesNegativeDeltaDownToSafetyStockFloor()
+{
+    var state = new InventoryState();
+
+    var adjusted = AdjustStock.Execute(" widget ", " north ", -8, " cycle count ", state);
+
+    Assert(
+        adjusted.Outcome == AdjustStockOutcome.Adjusted,
+        "mixed-case adjustment that lands on the safety floor succeeds"
+    );
+    Assert(
+        adjusted.Item
+            is { Sku: "WIDGET", Location: "NORTH", Delta: -8, Available: 2, SafetyStock: 2 },
+        "response uses uppercase identifiers with the applied delta, resulting available, and floor"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 2,
+        "stock lands exactly on the safety floor"
+    );
+    Assert(state.Version == 1, "successful adjustment increments version once");
+    Assert(state.Adjustments.Count == 1, "successful adjustment appends one audit record");
+    var audit = state.Adjustments.Values.Single();
+    Assert(audit.Id != Guid.Empty, "audit record carries a new identifier");
+    Assert(
+        audit
+            is {
+                Sku: "WIDGET",
+                Location: "NORTH",
+                Delta: -8,
+                ResultingAvailable: 2,
+                Reason: "cycle count",
+            },
+        "audit record carries normalized identifiers, delta, resulting available, and reason"
+    );
+    Assert(audit.OccurredUtc.Offset == TimeSpan.Zero, "audit timestamp is recorded in UTC");
+    var inventory = GetInventory.Execute("widget", state)!;
+    Assert(
+        inventory.Locations[0]
+            is { Location: "NORTH", Available: 2, SafetyStock: 2, Allocatable: 0 },
+        "adjusted stock is visible through the inventory lookup"
+    );
+    Assert(inventory.Available == 7, "aggregate allocatable stock reflects the correction");
+
+    var belowFloor = AdjustStock.Execute("WIDGET", "NORTH", -1, "shrinkage", state);
+
+    Assert(
+        belowFloor.Outcome == AdjustStockOutcome.BelowSafetyStock,
+        "one unit below the safety floor is refused"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 2,
+        "floor refusal leaves stock at the floor"
+    );
+    Assert(state.Adjustments.Count == 1, "floor refusal appends no audit record");
+    Assert(state.Version == 1, "floor refusal does not increment version");
+}
+
+static void AdjustStock_RejectsInvalidShapeBeforeIdentityAndFloor()
+{
+    var state = new InventoryState();
+
+    var zero = AdjustStock.Execute("widget", "north", 0, "cycle count", state);
+    var whitespaceReason = AdjustStock.Execute("widget", "north", -1, "   ", state);
+    var emptyReason = AdjustStock.Execute("widget", "north", 1, "", state);
+    var blankSku = AdjustStock.Execute(" ", "north", -1, "cycle count", state);
+    var blankLocation = AdjustStock.Execute("widget", "\t", -1, "cycle count", state);
+    var shapeBeforeIdentity = AdjustStock.Execute("missing", "north", 0, "cycle count", state);
+    var identityBeforeFloor = AdjustStock.Execute("widget", "east", -50, "cycle count", state);
+
+    Assert(zero.Outcome == AdjustStockOutcome.Invalid, "zero delta is rejected");
+    Assert(zero.InvalidField == "delta", "zero delta names the delta field");
+    Assert(
+        whitespaceReason.Outcome == AdjustStockOutcome.Invalid,
+        "whitespace-only reason is rejected"
+    );
+    Assert(whitespaceReason.InvalidField == "reason", "blank reason names the reason field");
+    Assert(emptyReason.Outcome == AdjustStockOutcome.Invalid, "empty reason is rejected");
+    Assert(emptyReason.InvalidField == "reason", "empty reason names the reason field");
+    Assert(blankSku.Outcome == AdjustStockOutcome.Invalid, "blank SKU is rejected");
+    Assert(blankSku.InvalidField == "sku", "blank SKU names the sku field");
+    Assert(blankLocation.Outcome == AdjustStockOutcome.Invalid, "blank location is rejected");
+    Assert(blankLocation.InvalidField == "location", "blank location names the location field");
+    Assert(
+        shapeBeforeIdentity.InvalidField == "delta",
+        "shape validation runs before identity resolution"
+    );
+    Assert(
+        identityBeforeFloor.Outcome == AdjustStockOutcome.UnknownLocation,
+        "identity resolution runs before the safety-stock floor"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 10
+            && state.Stock["WIDGET"]["SOUTH"].Available == 8,
+        "rejected adjustments leave every location quantity unchanged"
+    );
+    Assert(state.Adjustments.Count == 0, "rejected adjustments store no audit records");
+    Assert(state.Version == 0, "rejected adjustments do not increment version");
+}
+
+static void AdjustStock_DoesNotCreateUnknownSkuOrLocation()
+{
+    var state = new InventoryState();
+
+    var missingSku = AdjustStock.Execute("gadget", "north", -1, "cycle count", state);
+    var missingLocation = AdjustStock.Execute("widget", " east ", 3, "cycle count", state);
+
+    Assert(missingSku.Outcome == AdjustStockOutcome.UnknownSku, "unknown SKU is rejected");
+    Assert(
+        missingLocation.Outcome == AdjustStockOutcome.UnknownLocation,
+        "known SKU with an unknown location is rejected"
+    );
+
+    var inventory = GetInventory.Execute("widget", state)!;
+    Assert(inventory.Locations.Length == 2, "unknown locations are not created implicitly");
+    Assert(
+        !inventory.Locations.Any(location => location.Location == "EAST"),
+        "refused adjustment does not add an EAST location"
+    );
+    Assert(GetInventory.Execute("gadget", state) is null, "unknown SKU is not created implicitly");
+    Assert(state.Adjustments.Count == 0, "identity failures store no audit records");
+    Assert(state.Version == 0, "identity failures do not increment version");
+}
+
+static void AdjustStock_RejectsRangeViolationsWithoutMutation()
+{
+    var state = new InventoryState();
+    SeedLocation(state, "gadget", "east", 0, 0);
+    SeedLocation(state, "overflow", "depot", int.MaxValue, 0);
+    SeedLocation(state, "wrap", "depot", int.MinValue + 5, 0);
+
+    var positiveOverflow = AdjustStock.Execute("widget", "north", int.MaxValue, "count", state);
+    var maxedOverflow = AdjustStock.Execute("overflow", "depot", 1, "count", state);
+    var belowZero = AdjustStock.Execute("gadget", "east", -1, "count", state);
+    var intMinDelta = AdjustStock.Execute("widget", "north", int.MinValue, "count", state);
+    var negativeWrap = AdjustStock.Execute("wrap", "depot", -10, "count", state);
+
+    Assert(
+        positiveOverflow.Outcome == AdjustStockOutcome.OutOfRange,
+        "delta that would overflow int is refused"
+    );
+    Assert(
+        maxedOverflow.Outcome == AdjustStockOutcome.OutOfRange,
+        "delta that would push a maximum quantity past int.MaxValue is refused"
+    );
+    Assert(
+        belowZero.Outcome == AdjustStockOutcome.BelowSafetyStock,
+        "delta that would drive available below zero is refused"
+    );
+    Assert(
+        intMinDelta.Outcome == AdjustStockOutcome.BelowSafetyStock,
+        "minimum int delta is refused rather than wrapped"
+    );
+    Assert(
+        negativeWrap.Outcome == AdjustStockOutcome.OutOfRange,
+        "delta that would fall below int.MinValue is refused"
+    );
+    Assert(
+        state.Stock["WRAP"]["DEPOT"].Available == int.MinValue + 5,
+        "range refusals leave extreme quantities unchanged"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 10
+            && state.Stock["GADGET"]["EAST"].Available == 0
+            && state.Stock["OVERFLOW"]["DEPOT"].Available == int.MaxValue,
+        "range refusals leave every quantity unchanged"
+    );
+    Assert(state.Adjustments.Count == 0, "range refusals store no audit records");
+    Assert(state.Version == 0, "range refusals do not increment version");
+}
+
+static void AdjustStock_PositiveDeltaRaisesAvailableByExactlyTheDelta()
+{
+    var state = new InventoryState();
+
+    var received = AdjustStock.Execute("widget", "north", 5, "found stock", state);
+    var corrected = AdjustStock.Execute("widget", "north", -13, "cycle count", state);
+
+    Assert(received.Outcome == AdjustStockOutcome.Adjusted, "positive delta succeeds");
+    Assert(
+        received.Item
+            is { Sku: "WIDGET", Location: "NORTH", Delta: 5, Available: 15, SafetyStock: 2 },
+        "positive delta raises available by exactly the delta and reports the floor"
+    );
+    Assert(
+        corrected.Item is { Delta: -13, Available: 2, SafetyStock: 2 },
+        "later delta applies to the already corrected quantity"
+    );
+    Assert(
+        state.Stock["WIDGET"]["NORTH"].Available == 2,
+        "stock lands on the floor after the second adjustment"
+    );
+    var audit = state.Adjustments.Values.ToArray();
+    Assert(audit.Length == 2, "each successful adjustment appends exactly one audit record");
+    Assert(
+        audit.Select(record => record.Id).Distinct().Count() == 2,
+        "each audit record carries its own identifier"
+    );
+    Assert(
+        audit.All(record => record.Sku == "WIDGET" && record.Location == "NORTH"),
+        "audit records carry uppercase identifiers"
+    );
+    Assert(
+        audit.Single(record => record.Delta == 5).ResultingAvailable == 15,
+        "positive audit record pairs the applied delta with its resulting quantity"
+    );
+    Assert(
+        audit.Single(record => record.Delta == -13).ResultingAvailable == 2,
+        "negative audit record pairs the applied delta with its resulting quantity"
+    );
+    Assert(state.Version == 2, "each successful adjustment increments version exactly once");
+}
+
+static void AdjustStock_ConcurrentAdjustmentsAppendOneAuditAndVersionPerSuccess()
+{
+    var state = new InventoryState();
+    var deltas = new[] { -3, -3, -3, -3 };
+    var outcomes = new AdjustStockOutcome[deltas.Length];
+    var start = new ManualResetEventSlim(false);
+    var threads = deltas
+        .Select(
+            (delta, index) =>
+                new Thread(() =>
+                {
+                    start.Wait();
+                    outcomes[index] = AdjustStock
+                        .Execute("widget", "north", delta, "cycle count", state)
+                        .Outcome;
+                })
+        )
+        .ToArray();
+
+    foreach (var thread in threads)
+    {
+        thread.Start();
+    }
+    start.Set();
+    foreach (var thread in threads)
+    {
+        thread.Join();
+    }
+
+    var succeeded = outcomes.Count(outcome => outcome == AdjustStockOutcome.Adjusted);
+    var refused = outcomes.Count(outcome => outcome == AdjustStockOutcome.BelowSafetyStock);
+
+    Assert(succeeded == 2, "only adjustments that respect the floor at commit succeed");
+    Assert(refused == 2, "adjustments that would cross the floor are refused");
+    Assert(
+        state.Stock["WIDGET"]["NORTH"] is { Available: 4, SafetyStock: 2 },
+        "concurrent adjustments never cross the safety floor"
+    );
+    Assert(
+        state.Adjustments.Count == succeeded,
+        "concurrent successes append exactly one audit record per write"
+    );
+    Assert(state.Version == succeeded, "concurrent successes increment version once per write");
+    Assert(PhysicalStock(state, "WIDGET") == 12, "committed adjustments remove only their delta");
+}
+
+static void GetStockAdjustments_ReturnsSkuHistoryInChronologicalOrder()
+{
+    var state = new InventoryState();
+
+    var shrinkage = AdjustStock.Execute("widget", "south", -1, "shrinkage", state);
+    var counted = AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+
+    var history = GetStockAdjustments.Execute("WIDGET", state);
+
+    Assert(history is { Length: 2 }, "every adjustment for the SKU is returned");
+    Assert(
+        history![0]
+            is {
+                Sku: "WIDGET",
+                Location: "SOUTH",
+                Delta: -1,
+                ResultingAvailable: 7,
+                Reason: "shrinkage",
+            },
+        "oldest adjustment is first with its audit fields, not a location-ordered view"
+    );
+    Assert(
+        history[1]
+            is {
+                Sku: "WIDGET",
+                Location: "NORTH",
+                Delta: -8,
+                ResultingAvailable: 2,
+                Reason: "cycle count",
+            },
+        "newest adjustment is last with its audit fields"
+    );
+    Assert(
+        history[0].OccurredUtc <= history[1].OccurredUtc,
+        "history is ordered chronologically by the recorded UTC timestamp"
+    );
+    Assert(
+        history.All(row => row.OccurredUtc.Offset == TimeSpan.Zero),
+        "history timestamps are reported in UTC"
+    );
+    var audits = state.Adjustments.Values.ToArray();
+    Assert(
+        history[0].Id == audits[0].Id && history[1].Id == audits[1].Id,
+        "history rows carry the identifiers the adjustment endpoint created"
+    );
+    Assert(
+        history[0].Delta == shrinkage.Item!.Delta
+            && history[0].ResultingAvailable == shrinkage.Item.Available
+            && history[0].Location == shrinkage.Item.Location,
+        "oldest row matches the adjustment endpoint response"
+    );
+    Assert(
+        history[1].Delta == counted.Item!.Delta
+            && history[1].ResultingAvailable == counted.Item.Available
+            && history[1].Location == counted.Item.Location,
+        "newest row matches the adjustment endpoint response"
+    );
+}
+
+static void GetStockAdjustments_ScopesRowsToTheNormalizedSku()
+{
+    var state = new InventoryState();
+    SeedLocation(state, "gadget", "east", 5, 0);
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+    AdjustStock.Execute("gadget", "east", 2, "found stock", state);
+
+    var widget = GetStockAdjustments.Execute(" widget ", state);
+    var gadget = GetStockAdjustments.Execute("GADGET", state);
+
+    Assert(widget is { Length: 1 }, "only the requested SKU's adjustments are returned");
+    Assert(
+        widget![0] is { Sku: "WIDGET", Location: "NORTH", Delta: -8, ResultingAvailable: 2 },
+        "requested SKU row keeps its normalized uppercase identifiers"
+    );
+    Assert(
+        gadget is { Length: 1 } && gadget[0] is { Sku: "GADGET", Location: "EAST", Delta: 2 },
+        "second SKU has its own single row"
+    );
+    Assert(
+        !widget.Any(row => row.Sku == "GADGET") && !gadget!.Any(row => row.Sku == "WIDGET"),
+        "adjustments for one SKU never appear in another SKU's history"
+    );
+    Assert(
+        widget.SequenceEqual(GetStockAdjustments.Execute("WIDGET", state)),
+        "trimmed lowercase SKU returns the same rows as the uppercase form"
+    );
+}
+
+static void GetStockAdjustments_ReturnsEmptyHistoryForKnownSkuWithoutAdjustments()
+{
+    var state = new InventoryState();
+    SeedLocation(state, "gadget", "east", 5, 0);
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+
+    var gadget = GetStockAdjustments.Execute("gadget", state);
+
+    Assert(gadget is not null, "known SKU with no adjustments is not treated as absent");
+    Assert(gadget!.Length == 0, "known SKU with no adjustments returns an empty history");
+    Assert(state.Adjustments.Count == 1, "reading an empty history touches no audit records");
+    Assert(
+        GetStockAdjustments.Execute("widget", state) is { Length: 1 },
+        "the other SKU's history is still readable"
+    );
+}
+
+static void GetStockAdjustments_ReturnsNullForBlankOrUnknownSku()
+{
+    var state = new InventoryState();
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+
+    Assert(GetStockAdjustments.Execute(" ", state) is null, "blank SKU is absent");
+    Assert(GetStockAdjustments.Execute("", state) is null, "empty SKU is absent");
+    Assert(GetStockAdjustments.Execute("missing", state) is null, "unknown SKU is absent");
+    Assert(
+        GetStockAdjustments.Execute("WIDGET", state) is { Length: 1 },
+        "known SKU with adjustments is still present"
+    );
+}
+
+static void GetStockAdjustments_IsMutationFreeAcrossRepeatCalls()
+{
+    var state = new InventoryState();
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+    var version = state.Version;
+    var auditCount = state.Adjustments.Count;
+    var physical = PhysicalStock(state, "WIDGET");
+    var before = GetInventory.Execute("widget", state)!;
+
+    var first = GetStockAdjustments.Execute("widget", state);
+    var second = GetStockAdjustments.Execute("widget", state);
+
+    Assert(
+        first!.SequenceEqual(second!),
+        "consecutive reads return an equal adjustment sequence"
+    );
+    Assert(state.Version == version, "reading history does not increment the state version");
+    Assert(state.Adjustments.Count == auditCount, "reading history appends no audit records");
+    Assert(PhysicalStock(state, "WIDGET") == physical, "reading history changes no stock");
+    var after = GetInventory.Execute("widget", state)!;
+    Assert(
+        after.Available == before.Available && after.Locations.SequenceEqual(before.Locations),
+        "every available quantity is identical before and after reading history"
+    );
 }
 
 static void CreateReservation_AllocatesGreedilyWithoutCrossingSafetyStock()
