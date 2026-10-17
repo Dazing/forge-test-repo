@@ -10,7 +10,7 @@ the executable behavioral test harness is in `tests/Inventory.Tests/`.
 | ---- | ------- |
 | `Inventory.slnx` | Solution containing the API and test harness |
 | `src/Inventory.Api/` | API composition, in-memory state, and feature slices |
-| `src/Inventory.Api/Features/Inventory/` | Inventory lookup, receipt, adjustment, reporting, and transfer endpoints |
+| `src/Inventory.Api/Features/Inventory/` | Inventory lookup, receipt, adjustment, adjustment history, reporting, and transfer endpoints |
 | `src/Inventory.Api/Features/Reservations/` | Reservation creation, lookup, confirmation, and cancellation endpoints |
 | `tests/Inventory.Tests/` | Executable behavioral checks |
 
@@ -21,6 +21,7 @@ the executable behavioral test harness is in `tests/Inventory.Tests/`.
 | `GET` | `/health` | `200` | Return `{"status":"ok"}` |
 | `GET` | `/inventory/{sku}` | `200` | Return allocatable inventory and per-location quantities |
 | `GET` | `/inventory/low-stock` | `200` | Return locations at or below their safety-stock threshold |
+| `GET` | `/inventory/{sku}/adjustments` | `200` | Return one SKU's stock adjustment history, oldest first |
 | `POST` | `/inventory/{sku}/locations/{location}/receipts` | `200` | Add stock to a location |
 | `POST` | `/inventory/{sku}/locations/{location}/adjustments` | `200` | Correct a location's counted stock with a recorded reason |
 | `POST` | `/inventory/{sku}/transfers` | `200` | Transfer stock between existing locations |
@@ -82,8 +83,29 @@ Blank identifiers, a blank reason, and a zero delta return `400`; an unknown SKU
 location returns `404`; a floor breach or an integer range violation returns `409`.
 Every successful adjustment appends one audit record — new identifier, uppercase SKU and
 location, delta, resulting available quantity, reason, and UTC timestamp — in the same
-critical section as the stock write; reading that history over HTTP is a separate
-capability and is not served today.
+critical section as the stock write.
+
+`GET /inventory/{sku}/adjustments` reads one SKU's audit trail back, oldest first:
+
+```json
+[
+  {
+    "id": "6f1c2a3e-0000-0000-0000-000000000000",
+    "sku": "WIDGET",
+    "location": "NORTH",
+    "delta": -8,
+    "resultingAvailable": 2,
+    "reason": "cycle count",
+    "occurredUtc": "2026-10-17T06:51:00+00:00"
+  }
+]
+```
+
+Rows are ordered chronologically by `occurredUtc`; adjustments recorded in the same tick
+keep the order in which they committed, because `DateTimeOffset.UtcNow` can repeat within a
+process. The read is SKU-scoped and case-insensitive, and it mutates nothing — no stock,
+audit record, or state version changes. A known SKU with no adjustments returns `200` with
+`[]`; a blank or unknown SKU returns `404`.
 
 `GET /inventory/low-stock` returns SKU/location pairs whose available quantity is at
 or below safety stock. Results are ordered by SKU and location. `shortfall` is

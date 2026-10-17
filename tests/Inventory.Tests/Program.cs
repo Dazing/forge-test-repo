@@ -16,13 +16,18 @@ AdjustStock_DoesNotCreateUnknownSkuOrLocation();
 AdjustStock_RejectsRangeViolationsWithoutMutation();
 AdjustStock_PositiveDeltaRaisesAvailableByExactlyTheDelta();
 AdjustStock_ConcurrentAdjustmentsAppendOneAuditAndVersionPerSuccess();
+GetStockAdjustments_ReturnsSkuHistoryInChronologicalOrder();
+GetStockAdjustments_ScopesRowsToTheNormalizedSku();
+GetStockAdjustments_ReturnsEmptyHistoryForKnownSkuWithoutAdjustments();
+GetStockAdjustments_ReturnsNullForBlankOrUnknownSku();
+GetStockAdjustments_IsMutationFreeAcrossRepeatCalls();
 CreateReservation_AllocatesGreedilyWithoutCrossingSafetyStock();
 CreateReservation_FailuresAreMutationFree();
 GetReservation_ReturnsCompleteStableRepresentation();
 ConfirmReservation_ConsumesStockAndRejectsFurtherTransitions();
 CancelReservation_RestoresEveryAllocationExactlyOnce();
 ReservationLifecycle_ConservesPhysicalStock();
-Console.WriteLine("PASS: 20 location-aware inventory slice behavior checks");
+Console.WriteLine("PASS: 25 location-aware inventory slice behavior checks");
 
 static void GetInventory_NormalizesAndOrdersLocationAwareStock()
 {
@@ -670,6 +675,151 @@ static void AdjustStock_ConcurrentAdjustmentsAppendOneAuditAndVersionPerSuccess(
     );
     Assert(state.Version == succeeded, "concurrent successes increment version once per write");
     Assert(PhysicalStock(state, "WIDGET") == 12, "committed adjustments remove only their delta");
+}
+
+static void GetStockAdjustments_ReturnsSkuHistoryInChronologicalOrder()
+{
+    var state = new InventoryState();
+
+    var shrinkage = AdjustStock.Execute("widget", "south", -1, "shrinkage", state);
+    var counted = AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+
+    var history = GetStockAdjustments.Execute("WIDGET", state);
+
+    Assert(history is { Length: 2 }, "every adjustment for the SKU is returned");
+    Assert(
+        history![0]
+            is {
+                Sku: "WIDGET",
+                Location: "SOUTH",
+                Delta: -1,
+                ResultingAvailable: 7,
+                Reason: "shrinkage",
+            },
+        "oldest adjustment is first with its audit fields, not a location-ordered view"
+    );
+    Assert(
+        history[1]
+            is {
+                Sku: "WIDGET",
+                Location: "NORTH",
+                Delta: -8,
+                ResultingAvailable: 2,
+                Reason: "cycle count",
+            },
+        "newest adjustment is last with its audit fields"
+    );
+    Assert(
+        history[0].OccurredUtc <= history[1].OccurredUtc,
+        "history is ordered chronologically by the recorded UTC timestamp"
+    );
+    Assert(
+        history.All(row => row.OccurredUtc.Offset == TimeSpan.Zero),
+        "history timestamps are reported in UTC"
+    );
+    var audits = state.Adjustments.Values.ToArray();
+    Assert(
+        history[0].Id == audits[0].Id && history[1].Id == audits[1].Id,
+        "history rows carry the identifiers the adjustment endpoint created"
+    );
+    Assert(
+        history[0].Delta == shrinkage.Item!.Delta
+            && history[0].ResultingAvailable == shrinkage.Item.Available
+            && history[0].Location == shrinkage.Item.Location,
+        "oldest row matches the adjustment endpoint response"
+    );
+    Assert(
+        history[1].Delta == counted.Item!.Delta
+            && history[1].ResultingAvailable == counted.Item.Available
+            && history[1].Location == counted.Item.Location,
+        "newest row matches the adjustment endpoint response"
+    );
+}
+
+static void GetStockAdjustments_ScopesRowsToTheNormalizedSku()
+{
+    var state = new InventoryState();
+    SeedLocation(state, "gadget", "east", 5, 0);
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+    AdjustStock.Execute("gadget", "east", 2, "found stock", state);
+
+    var widget = GetStockAdjustments.Execute(" widget ", state);
+    var gadget = GetStockAdjustments.Execute("GADGET", state);
+
+    Assert(widget is { Length: 1 }, "only the requested SKU's adjustments are returned");
+    Assert(
+        widget![0] is { Sku: "WIDGET", Location: "NORTH", Delta: -8, ResultingAvailable: 2 },
+        "requested SKU row keeps its normalized uppercase identifiers"
+    );
+    Assert(
+        gadget is { Length: 1 } && gadget[0] is { Sku: "GADGET", Location: "EAST", Delta: 2 },
+        "second SKU has its own single row"
+    );
+    Assert(
+        !widget.Any(row => row.Sku == "GADGET") && !gadget!.Any(row => row.Sku == "WIDGET"),
+        "adjustments for one SKU never appear in another SKU's history"
+    );
+    Assert(
+        widget.SequenceEqual(GetStockAdjustments.Execute("WIDGET", state)),
+        "trimmed lowercase SKU returns the same rows as the uppercase form"
+    );
+}
+
+static void GetStockAdjustments_ReturnsEmptyHistoryForKnownSkuWithoutAdjustments()
+{
+    var state = new InventoryState();
+    SeedLocation(state, "gadget", "east", 5, 0);
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+
+    var gadget = GetStockAdjustments.Execute("gadget", state);
+
+    Assert(gadget is not null, "known SKU with no adjustments is not treated as absent");
+    Assert(gadget!.Length == 0, "known SKU with no adjustments returns an empty history");
+    Assert(state.Adjustments.Count == 1, "reading an empty history touches no audit records");
+    Assert(
+        GetStockAdjustments.Execute("widget", state) is { Length: 1 },
+        "the other SKU's history is still readable"
+    );
+}
+
+static void GetStockAdjustments_ReturnsNullForBlankOrUnknownSku()
+{
+    var state = new InventoryState();
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+
+    Assert(GetStockAdjustments.Execute(" ", state) is null, "blank SKU is absent");
+    Assert(GetStockAdjustments.Execute("", state) is null, "empty SKU is absent");
+    Assert(GetStockAdjustments.Execute("missing", state) is null, "unknown SKU is absent");
+    Assert(
+        GetStockAdjustments.Execute("WIDGET", state) is { Length: 1 },
+        "known SKU with adjustments is still present"
+    );
+}
+
+static void GetStockAdjustments_IsMutationFreeAcrossRepeatCalls()
+{
+    var state = new InventoryState();
+    AdjustStock.Execute("widget", "north", -8, "cycle count", state);
+    var version = state.Version;
+    var auditCount = state.Adjustments.Count;
+    var physical = PhysicalStock(state, "WIDGET");
+    var before = GetInventory.Execute("widget", state)!;
+
+    var first = GetStockAdjustments.Execute("widget", state);
+    var second = GetStockAdjustments.Execute("widget", state);
+
+    Assert(
+        first!.SequenceEqual(second!),
+        "consecutive reads return an equal adjustment sequence"
+    );
+    Assert(state.Version == version, "reading history does not increment the state version");
+    Assert(state.Adjustments.Count == auditCount, "reading history appends no audit records");
+    Assert(PhysicalStock(state, "WIDGET") == physical, "reading history changes no stock");
+    var after = GetInventory.Execute("widget", state)!;
+    Assert(
+        after.Available == before.Available && after.Locations.SequenceEqual(before.Locations),
+        "every available quantity is identical before and after reading history"
+    );
 }
 
 static void CreateReservation_AllocatesGreedilyWithoutCrossingSafetyStock()
