@@ -10,7 +10,7 @@ the executable behavioral test harness is in `tests/Inventory.Tests/`.
 | ---- | ------- |
 | `Inventory.slnx` | Solution containing the API and test harness |
 | `src/Inventory.Api/` | API composition, in-memory state, and feature slices |
-| `src/Inventory.Api/Features/Inventory/` | Inventory lookup, receipt, reporting, and transfer endpoints |
+| `src/Inventory.Api/Features/Inventory/` | Inventory lookup, receipt, adjustment, reporting, and transfer endpoints |
 | `src/Inventory.Api/Features/Reservations/` | Reservation creation, lookup, confirmation, and cancellation endpoints |
 | `tests/Inventory.Tests/` | Executable behavioral checks |
 
@@ -22,6 +22,7 @@ the executable behavioral test harness is in `tests/Inventory.Tests/`.
 | `GET` | `/inventory/{sku}` | `200` | Return allocatable inventory and per-location quantities |
 | `GET` | `/inventory/low-stock` | `200` | Return locations at or below their safety-stock threshold |
 | `POST` | `/inventory/{sku}/locations/{location}/receipts` | `200` | Add stock to a location |
+| `POST` | `/inventory/{sku}/locations/{location}/adjustments` | `200` | Correct a location's counted stock with a recorded reason |
 | `POST` | `/inventory/{sku}/transfers` | `200` | Transfer stock between existing locations |
 | `POST` | `/reservations` | `201` | Allocate stock and create a pending reservation |
 | `GET` | `/reservations/{id}` | `200` | Return a reservation |
@@ -64,6 +65,25 @@ Unknown or blank SKUs return `404`.
 A receipt can create a new SKU or location; new locations start with safety stock `0`.
 Blank identifiers or non-positive quantities return `400`. An integer overflow returns
 `409`.
+
+`POST /inventory/{sku}/locations/{location}/adjustments` accepts:
+
+```json
+{ "delta": -3, "reason": "cycle count" }
+```
+
+An adjustment moves a location's recorded stock to a counted reality (shrinkage,
+cycle-count fixes). `delta` is signed and must not be zero; success returns the
+normalized identifiers, the applied `delta`, the resulting `available`, and the
+`safetyStock` that bounded it. The resulting quantity may land exactly on the safety
+stock floor but never below it, mirroring the transfer source-floor rule, and must stay
+inside the `int` range. Adjustments never create a SKU or a location — only receipts do.
+Blank identifiers, a blank reason, and a zero delta return `400`; an unknown SKU or
+location returns `404`; a floor breach or an integer range violation returns `409`.
+Every successful adjustment appends one audit record — new identifier, uppercase SKU and
+location, delta, resulting available quantity, reason, and UTC timestamp — in the same
+critical section as the stock write; reading that history over HTTP is a separate
+capability and is not served today.
 
 `GET /inventory/low-stock` returns SKU/location pairs whose available quantity is at
 or below safety stock. Results are ordered by SKU and location. `shortfall` is

@@ -18,6 +18,8 @@ internal sealed class InventoryState
 
     internal Dictionary<Guid, ReservationRecord> Reservations { get; } = [];
 
+    internal Dictionary<Guid, StockAdjustmentRecord> Adjustments { get; } = [];
+
     internal long Version { get; set; }
 }
 
@@ -26,6 +28,16 @@ internal sealed record LocationStockRecord(
     string Location,
     int Available,
     int SafetyStock
+);
+
+internal sealed record StockAdjustmentRecord(
+    Guid Id,
+    string Sku,
+    string Location,
+    int Delta,
+    int ResultingAvailable,
+    string Reason,
+    DateTimeOffset OccurredUtc
 );
 
 internal sealed record ReservationRecord(

@@ -8,6 +8,7 @@ builder.Services.AddSingleton<InventoryState>();
 
 var app = builder.Build();
 GetHealth.Map(app);
+AdjustStock.Map(app);
 GetInventory.Map(app);
 GetLowStockReport.Map(app);
 ReceiveLocationStock.Map(app);
